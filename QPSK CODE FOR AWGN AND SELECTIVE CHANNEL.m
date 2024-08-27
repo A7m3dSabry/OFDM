@@ -1,0 +1,122 @@
+clear;
+%close all;
+input_signal = randi([0 1] , 1 , 16*1000);
+Noise_Start = -20;
+Noise_N = 30;
+%% qpsk
+BER = calc(input_signal,1,@(a) mapper_qpsk(a),4,4 , 1,Noise_Start,Noise_N,[0].',[-1
+1].',[1].');
+BER =[BER ; calc(input_signal,3,@(a)mapper_qpsk(a),4,4 , 1,Noise_Start,Noise_N,[0].',[-1
+1].',[1].')];
+%% 16-qam
+BER =[BER ;calc(input_signal,1,@(a)mapper_16qam(a),4,4 , 2.5,Noise_Start,Noise_N,[-2 0
+2].',[-3 -1 1 3].',[1 0].')];
+BER =[BER ;calc(input_signal,3,@(a) mapper_16qam(a) ,4,4, 2.5,Noise_Start,Noise_N,[-2 0
+2].',[-3 -1 1 3].',[1 0].')];
+%% Drawing
+x = Noise_Start:Noise_Start+Noise_N;
+figure;
+semilogy(x,BER(1,:),x,BER(2,:));
+xlabel('Eb/No (dB)'); ylabel('BER') ; title('QPSK');
+legend('QPSK-No Repetation' , 'QPSK-3 Repetations')
+figure;
+semilogy(x,BER(3,:),x,BER(4,:));
+xlabel('Eb/No (dB)'); ylabel('BER');title('16 QAM');
+legend('QAM-No Repetation' , 'QAM-3 Repetations')
+
+%% Main function
+function [BER] = calc(input_signal,elementSamples,mapper,...
+	m,n,... %interleaver
+	Eb,Noise_Start,Noise_N, ...
+	limits,levels,values)
+	
+	repeated_signal = repeate_encoder(input_signal,elementSamples);
+	interleaver_output = interleave(repeated_signal,m*n,m,n);
+	maped=mapper(interleaver_output);
+	N0 = (Eb)./(10.^((Noise_Start:Noise_Start+Noise_N)./10));
+	BER = zeros(1,length(N0));
+	for i=1:length(N0)
+	[channel_output,R] = channel_flat_rayLeigh(maped,N0(i));
+		rec_output = reciever(channel_output,R,limits,levels,values);
+		deinterleved_output = deinterleave(reshape(rec_output.',1,[]),m*n,m,n);
+		out = repeate_decoder(deinterleved_output,elementSamples);
+		BER(i) = sum(xor(out,input_signal))/length(input_signal);
+	end
+end
+%% channel encoders
+function [signal] = repeate_encoder(input_signal,count)
+
+% repeate every element in input_signal by count
+signal = repelem(input_signal,count);
+end
+function outputSignal = repeate_decoder(input_signal,count)
+	%input signal is row
+	outputSignal = reshape(input_signal,count,[]).';
+	outputSignal = round(sum(outputSignal,2)/count); % soft decoding
+	outputSignal = reshape(outputSignal,1,[]);
+end
+%% interleavers
+function [signal] = interleave(input_signal,elements_count,m,n)
+	%signal is row
+	signal = reshape(input_signal,elements_count,[]).';
+	for i =1:(length(input_signal)/length(signal))
+		signal(i,:) = matintrlv(signal(i,:),m,n);
+end
+signal = reshape(signal.',1,[]);
+end
+function [signal] = deinterleave(input_signal,shaping,m,n)
+	% row
+	signal = reshape(input_signal,shaping,[]).';
+	for i =1:(length(input_signal)/length(signal))
+		signal(i,:) = matdeintrlv(signal(i,:),m,n);
+	end
+	signal = reshape(signal.',1,[]);
+end
+%% mappers
+function [outputSignal] = mapper_qpsk(inputSignal)
+	% signal *Alpha + c = maped value
+	outputSignal = reshape(inputSignal,2,[]).';
+	outputSignal = outputSignal .* [2 2j] + [-1 -1j];
+	%sum Real and Imaginary parts
+	outputSignal = sum(outputSignal,2);
+end
+function [outputSignal] = mapper_16qam(input_signal)
+	%input is columns
+	outputSignal = reshape(input_signal,4,[]).'; %input is row
+	outputSignal = outputSignal .* [2 -2 2 -2j] + [-1 3 -1 3j]; % maping
+	%sum Real and Imaginary parts
+	outputSignal = sum(outputSignal(:,[1 3]) .* outputSignal(:,[2 4]),2);
+end
+%% chanels
+function [outputSignal,R] = channel_flat_rayLeigh(input_signal,N0)
+	%input is columns
+	noise = @(y) sqrt(y/2) .* randn(size(input_signal));
+	R = sqrt(0.5 .* (noise(2).^2 + noise(2).^2));
+	outputSignal = input_signal .*R + noise(N0) + 1j .* noise(N0);
+end
+%% reciever
+function [outputSignal] = reciever(input_signal , R , limits, levels,values)
+	% all inputs are columns
+	% quantize to get nearest point to the value on real and imag. axis.
+	input_signal = input_signal ./ R;
+	[idx,real_part] = quantiz(real(input_signal), limits, levels);
+	[idx,imag_part] = quantiz(imag(input_signal), limits, levels);
+	% first bit is the sign and rest of bits depends on the value on the
+	% axis
+
+	outputSignal = [real_part>0 demap(abs(real_part),unique(abs(levels)),values) ...
+	imag_part>0 demap(abs(imag_part),unique(abs(levels)),values)];
+end
+%% utils
+function [output] = demap(input , keys,values)
+	% detecting values on axis (sign is already detected)
+	if length(keys) == 1
+		output = [];
+	else
+		[m, n] = size(values);
+		output = zeros(length(input) , n);
+		for i=1:length(keys)
+			output = output + (input == keys(i)).* values(i,:);
+		end
+	end
+end
